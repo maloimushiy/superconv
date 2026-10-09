@@ -19,11 +19,31 @@ LeNet-подобная CNN на MNIST, PyTorch. Разбиение: 55 000 train
 
 Baseline использует inverse decay от LR = 0,01 и momentum = 0,9. В 1cycle LR растет до пика за 5 эпох, возвращается к 0,01 за следующие 5 и снижается до 0,00001 за последние 2. Momentum меняется 0,95 → 0,8 → 0,95.
 
+## Новые эксперименты
+
+В [comparison.ipynb](comparison.ipynb) четыре раздела: MNIST; CIFAR-10 с ResNet-20; сетка `пик LR × weight decay` на MNIST с фиксированным momentum; DQN из Stable-Baselines3 в LunarLander-v3. Новые результаты еще не получены.
+
+Сохраняем loss, accuracy, train–validation gap, нормы весов и градиентов, относительный размер обновления. Для RL основная метрика — награда на отдельных эпизодах, а TD-loss служит диагностикой. Это проверка регуляризующего эффекта большого LR, не доказательство эквивалентности L2-регуляризации.
+
 ## Запуск
 
 ```bash
+pip install swig==4.3.1
 pip install -r requirements.txt
-python train.py
+jupyter lab comparison.ipynb
 ```
 
-Модель и обучение находятся в `train.py`. Метрики сохраняются в `results/`; результаты завершенного запуска лежат в [results.csv](results.csv). Они получены до сокращения служебного кода, с теми же моделью и настройками. Ноутбук с разбором добавим отдельно.
+Три файла: `models.py` — модели, `train.py` — обучение классификаторов, `rl.py` — DQN. Сводные настройки и графики находятся в ноутбуке. Метрики и веса сохраняются в `results/`. Повторный запуск той же ячейки переобучает модели и перезаписывает ее результаты.
+
+Окружение на Beleriand: `~/superconv/.venv`, Jupyter kernel `Python (superconv)`. MNIST и CIFAR-10 уже скачаны в `~/superconv/data`. Сначала выберите свободную GPU через `nvidia-smi` (для DQN используется CPU):
+
+```bash
+ssh -L 8890:127.0.0.1:8890 beleriand
+cd ~/superconv
+source .venv/bin/activate
+CUDA_VISIBLE_DEVICES=5 jupyter lab --no-browser --ip=127.0.0.1 --port=8890
+```
+
+Индекс `5` — пример: проверьте занятость перед запуском. Откройте напечатанную Jupyter ссылку с токеном в браузере и выберите `comparison.ipynb`. Удобно запускать сервер внутри `tmux`, чтобы он пережил разрыв SSH.
+
+Время и цифры в первой таблице взяты из предыдущего завершенного запуска ([results.csv](results.csv)), до добавления диагностик. Новые замеры включают сбор норм и могут отличаться. Базовые настройки DQN взяты из [RL Zoo](https://github.com/DLR-RM/rl-baselines3-zoo/blob/master/hyperparams/dqn.yml).
