@@ -80,7 +80,7 @@ def evaluate(model, data):
 
 def train(data, name="onecycle", epochs=12, max_lr=0.1, seed=17, output="results",
           schedule=None, lr=0.01, weight_decay=0.0005, cycle_momentum=True,
-          batch_size=None, diagnostics_every=20):
+          batch_size=None, diagnostics_every=20, live=None):
     images, labels = data["train"]
     cifar = images.shape[1] == 3
     device = images.device
@@ -166,6 +166,8 @@ def train(data, name="onecycle", epochs=12, max_lr=0.1, seed=17, output="results
             checkpoint = copy.deepcopy(model.state_dict())
         pd.DataFrame(history).to_csv(folder / "history.csv", index=False)
         pd.DataFrame(diagnostics).to_csv(folder / "diagnostics.csv", index=False)
+        if live is not None:
+            live(history, diagnostics, f"{name} · seed {seed} · epoch {epoch}/{epochs}")
         if epoch == 1 or epoch % 5 == 0 or epoch == epochs:
             print(f"{name}, seed={seed}, epoch={epoch}: val={val_accuracy:.2f}%, train={elapsed:.1f}s", flush=True)
 

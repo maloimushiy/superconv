@@ -1,8 +1,10 @@
 import json
+import os
 import time
 from pathlib import Path
 
 import gymnasium as gym
+import imageio.v2 as imageio
 import numpy as np
 import pandas as pd
 import torch
@@ -41,6 +43,7 @@ class LoggedDQN(DQN):
                 step=self.num_timesteps, updates=self._n_updates,
                 td_loss=self.logger.name_to_value["train/loss"],
                 lr=self.policy.optimizer.param_groups[0]["lr"],
+                epsilon=self.exploration_rate,
                 weight_l2=norm.item(),
                 grad_l2_clipped=sum(p.grad.square().sum() for p in parameters).sqrt().item(),
                 update_ratio=(change / norm.clamp_min(1e-12)).item(),
@@ -62,44 +65,90 @@ def evaluate(model, env, seeds):
     return np.asarray(rewards)
 
 
+def record_replay(model, path, seed=30000):
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    env = gym.make("LunarLander-v3", render_mode="rgb_array")
+    reward_sum = 0
+    try:
+        observation, _ = env.reset(seed=seed)
+        with imageio.get_writer(path, fps=env.metadata["render_fps"], codec="libx264",
+                                macro_block_size=2, ffmpeg_log_level="error") as writer:
+            writer.append_data(env.render())
+            done = False
+            while not done:
+                action, _ = model.predict(observation, deterministic=True)
+                observation, reward, terminated, truncated, _ = env.step(int(action))
+                reward_sum += reward
+                writer.append_data(env.render())
+                done = terminated or truncated
+    finally:
+        env.close()
+    return reward_sum
+
+
 class Evaluation(BaseCallback):
-    def __init__(self, folder, interval, episodes):
+    def __init__(self, folder, interval, episodes, live, live_every, video_every):
         super().__init__()
         self.folder, self.interval, self.episodes = folder, interval, episodes
+        self.live, self.live_every, self.video_every = live, live_every, video_every
         self.env = gym.make("LunarLander-v3")
-        self.rows = []
-        self.eval_seconds = 0
+        self.rows, self.training_episodes, self.replays = [], [], []
+        self.overhead_seconds = 0
         self.started = time.perf_counter()
 
-    def measure(self):
+    def refresh(self, evaluation=False, video=False):
         started = time.perf_counter()
-        rewards = evaluate(self.model, self.env, range(10000, 10000 + self.episodes))
-        self.eval_seconds += time.perf_counter() - started
-        self.rows.append(dict(
-            step=self.num_timesteps, reward_mean=rewards.mean(), reward_std=rewards.std(ddof=1),
-            train_seconds=time.perf_counter() - self.started - self.eval_seconds,
-        ))
+        train_seconds = started - self.started - self.overhead_seconds
+        title = f"{self.folder.parent.name} · seed {self.model.seed} · step {self.num_timesteps}/{self.model._total_timesteps}"
+        if evaluation:
+            rewards = evaluate(self.model, self.env, range(10000, 10000 + self.episodes))
+            self.rows.append(dict(step=self.num_timesteps, reward_mean=rewards.mean(),
+                                  reward_std=rewards.std(ddof=1), train_seconds=train_seconds))
+            print(f"step={self.num_timesteps}: reward={rewards.mean():.1f} ± {rewards.std(ddof=1):.1f}", flush=True)
+        if self.live is not None:
+            self.live(self.rows, self.model.diagnostics, title, self.training_episodes)
+        if video:
+            path = self.folder / "replays" / f"step_{self.num_timesteps:07d}.mp4"
+            reward = record_replay(self.model, path)
+            self.replays.append(dict(step=self.num_timesteps, seed=30000, reward=reward, file=path.name))
+            pd.DataFrame(self.replays).to_csv(self.folder / "replays.csv", index=False)
+            if self.live is not None:
+                self.live.video(path, f"{title} · replay seed 30000 · reward {reward:.1f}")
         pd.DataFrame(self.rows).to_csv(self.folder / "evaluation.csv", index=False)
         pd.DataFrame(self.model.diagnostics).to_csv(self.folder / "diagnostics.csv", index=False)
-        print(f"step={self.num_timesteps}: reward={rewards.mean():.1f} ± {rewards.std(ddof=1):.1f}", flush=True)
+        pd.DataFrame(self.training_episodes, columns=["step", "reward", "length"]).to_csv(self.folder / "episodes.csv", index=False)
+        self.overhead_seconds += time.perf_counter() - started
+
+    def _on_training_start(self):
+        self.started = time.perf_counter()
+        self.refresh(evaluation=True, video=bool(self.video_every))
 
     def _on_step(self):
-        if self.num_timesteps % self.interval == 0 and self.num_timesteps < self.model._total_timesteps:
-            self.measure()
+        for info in self.locals["infos"]:
+            if "episode" in info:
+                self.training_episodes.append(dict(step=self.num_timesteps, reward=info["episode"]["r"], length=info["episode"]["l"]))
+        evaluation = self.num_timesteps % self.interval == 0
+        video = bool(self.video_every) and self.num_timesteps % self.video_every == 0
+        if self.num_timesteps < self.model._total_timesteps and (evaluation or video or self.num_timesteps % self.live_every == 0):
+            self.refresh(evaluation, video)
         return True
 
     def _on_training_end(self):
-        self.measure()
+        self.refresh(evaluation=True, video=bool(self.video_every))
         self.env.close()
 
 
 def train_rl(kind="constant", seed=17, steps=100000, output="results/rl",
-             eval_every=10000, eval_episodes=10, test_episodes=50):
+             eval_every=10000, eval_episodes=10, test_episodes=50,
+             live=None, live_every=2000, video_every=25000):
     torch.set_num_threads(1)
     folder = Path(output) / kind / str(seed)
     folder.mkdir(parents=True, exist_ok=True)
     config = dict(schedule=kind, seed=seed, steps=steps, base_lr=BASE_LR,
-                  eval_every=eval_every, eval_episodes=eval_episodes, test_episodes=test_episodes)
+                  eval_every=eval_every, eval_episodes=eval_episodes, test_episodes=test_episodes,
+                  live_every=live_every, video_every=video_every, replay_seed=30000)
     (folder / "config.json").write_text(json.dumps(config, indent=2))
     env = gym.make("LunarLander-v3")
     model = LoggedDQN(
@@ -110,7 +159,7 @@ def train_rl(kind="constant", seed=17, steps=100000, output="results/rl",
         exploration_final_eps=0.1, verbose=0,
     )
     model.diagnostics = []
-    callback = Evaluation(folder, eval_every, eval_episodes)
+    callback = Evaluation(folder, eval_every, eval_episodes, live, live_every, video_every)
     try:
         model.learn(total_timesteps=steps, callback=callback, log_interval=None)
         test_env = gym.make("LunarLander-v3")
