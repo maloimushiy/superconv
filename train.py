@@ -80,7 +80,8 @@ def evaluate(model, data):
 
 def train(data, name="onecycle", epochs=12, max_lr=0.1, seed=17, output="results",
           schedule=None, lr=0.01, weight_decay=0.0005, cycle_momentum=True,
-          batch_size=None, diagnostics_every=20, live=None):
+          batch_size=None, diagnostics_every=20, live=None, evaluate_test=True,
+          pct_start=5 / 12, three_phase=True):
     images, labels = data["train"]
     cifar = images.shape[1] == 3
     device = images.device
@@ -91,7 +92,8 @@ def train(data, name="onecycle", epochs=12, max_lr=0.1, seed=17, output="results
     folder.mkdir(parents=True, exist_ok=True)
     config = dict(name=name, epochs=epochs, max_lr=max_lr, seed=seed, schedule=schedule,
                   lr=lr, weight_decay=weight_decay, cycle_momentum=cycle_momentum,
-                  batch_size=batch_size, train_size=len(labels), dataset="cifar10" if cifar else "mnist")
+                  batch_size=batch_size, train_size=len(labels), dataset="cifar10" if cifar else "mnist",
+                  evaluate_test=evaluate_test, pct_start=pct_start, three_phase=three_phase)
     (folder / "config.json").write_text(json.dumps(config, indent=2))
     set_seed(seed)
     warmup = model_class().to(device)
@@ -107,7 +109,7 @@ def train(data, name="onecycle", epochs=12, max_lr=0.1, seed=17, output="results
     if schedule == "onecycle":
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer, max_lr=max_lr, total_steps=total_steps,
-            pct_start=5 / 12, three_phase=True, anneal_strategy="linear",
+            pct_start=pct_start, three_phase=three_phase, anneal_strategy="linear",
             div_factor=max_lr / lr, final_div_factor=1000,
             cycle_momentum=cycle_momentum, base_momentum=0.8, max_momentum=0.95,
         )
@@ -171,11 +173,12 @@ def train(data, name="onecycle", epochs=12, max_lr=0.1, seed=17, output="results
         if epoch == 1 or epoch % 5 == 0 or epoch == epochs:
             print(f"{name}, seed={seed}, epoch={epoch}: val={val_accuracy:.2f}%, train={elapsed:.1f}s", flush=True)
 
-    test_loss, test_accuracy = evaluate(model, data["test"])
-    results.append(dict(method=name, seed=seed, epochs=epochs, test_accuracy=test_accuracy,
-                        test_loss=test_loss, train_seconds=elapsed))
+    split = "test" if evaluate_test else "validation"
+    score_loss, score_accuracy = evaluate(model, data[split])
+    results.append(dict(method=name, seed=seed, epochs=epochs, train_seconds=elapsed,
+                        **{f"{split}_accuracy": score_accuracy, f"{split}_loss": score_loss}))
     torch.save(model.state_dict(), folder / "model.pt")
-    if checkpoint is not None:
+    if checkpoint is not None and evaluate_test:
         model.load_state_dict(checkpoint)
         test_loss, test_accuracy = evaluate(model, data["test"])
         results.append(dict(method="baseline_12", seed=seed, epochs=12,
